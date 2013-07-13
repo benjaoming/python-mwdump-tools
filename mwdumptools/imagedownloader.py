@@ -18,6 +18,7 @@ import urllib.request
 import time
 from hashlib import md5
 import os
+from PIL import Image
 
 ################################################################
 # Default values, set using kwargs in ImageDownloader.__init__ #
@@ -30,8 +31,7 @@ OUTPUT_ROOT = os.path.abspath("./images")
 
 # Convert images before saving
 CONVERT = True
-MAX_X = 1024
-MAX_Y = 1024
+MAX_IMAGE_SIZE = (1024, 1024)
 
 # Should match your CPU count and bandwidth speed.
 # If threads are handling image scaling and you have many cores, you
@@ -49,7 +49,15 @@ def load_url(url, timeout):
     conn = urllib.request.urlopen(url, timeout=timeout)
     return conn.readall()
 
+def scale_image(local_path, size, output_to=None):
+    if not output_to:
+        output_to = local_path
+    img = Image.open(local_path)
+    img.thumbnail(size, Image.ANTIALIAS)
+    img.save(output_to)
 
+
+# Decorator to add blocking waits when the job pool is saturated
 def job(fn):
     def decorated(self, *args, **kwargs):
         # Don't let the main thread add millions of jobs... just block it
@@ -60,43 +68,82 @@ def job(fn):
         self.jobs_running -= 1
     return decorated
 
-class WorkerThread():
+
+# http://docs.python.org/dev/library/concurrent.futures#processpoolexecutor
+# The ProcessPoolExecutor class is an Executor subclass that uses a pool of 
+# processes to execute calls asynchronously. ProcessPoolExecutor uses the
+# multiprocessing module, which allows it to side-step the
+# Global Interpreter Lock but also means that only picklable objects can
+# be executed and returned.
+#
+# http://docs.python.org/dev/library/concurrent.futures#concurrent.futures.Future.add_done_callback
+# Added callables are called in the order that they were added and are always
+# called in a thread belonging to the process that added them. If the callable
+# raises a Exception subclass, it will be logged and ignored. If the callable
+# raises a BaseException subclass, the behavior is undefined.
+class PoolWorker():
+    
     def __init__(self, processes):
         self.processes = processes
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=processes)
         self.jobs_running = 0
     
     @job
-    def get_image(self, url, local_path, callback, error_callback):
-        self.jobs_running += 1
+    def get_image(self, url, fname, local_path, callback, error_callback):
         try:
             future = self.executor.submit(load_url, url, 60)
-            future.add_done_callback(lambda future: callback(future.result(), local_path))
+            future.add_done_callback(lambda future: callback(future.result(), fname, local_path))
         except Exception as exc:
             error_callback(url, exc)
-
+    
+    @job
+    def scale_image(self, fname, local_path, size, callback, error_callback):
+        try:
+            future = self.executor.submit(scale_image, size, local_path, 60)
+            future.add_done_callback(lambda future: callback(future.result(), fname, local_path))
+        except Exception as exc:
+            error_callback(local_path, exc)
+    
+    
 
 class ImageDownloader(streamparser.XmlStreamParser):
     
     def __init__(self, in_file=None, out_file=None, namespace=6, 
         dlurl=DEFAULT_DOWNLOAD_PATH, output_dir=OUTPUT_ROOT,
+        max_image_size=MAX_IMAGE_SIZE,
         processes=MAX_THREADS, **kwargs):
         self.namespace = "6"
         self.dlurl = DEFAULT_DOWNLOAD_PATH
         self.output_dir = OUTPUT_ROOT
+        self.max_image_size = max_image_size
         streamparser.XmlStreamParser.__init__(self, in_file=in_file, out_file=out_file, **kwargs)
         self.max_processes = processes
-        self.worker = WorkerThread(processes)
+        self.worker = PoolWorker(processes)
     
-    def image_downloaded(self, data, local_path):
+    def image_downloaded(self, data, fname, local_path):
+        """Callback from WorkerThread"""
         full_path = os.path.join(self.output_dir, local_path)
         os.makedirs(os.path.dirname(full_path), mode=0o755, exist_ok=True)
         open(full_path, "wb").write(data)
         settings.logger.debug("Got image, length: {0:d}".format(len(data)))
+        self.worker.scale_image(
+            fname,
+            local_path,
+            self.max_image_size, 
+            self.image_resized, 
+            self.image_resize_error
+        )
     
-    def image_error(self, url, exception):
+    def image_download_error(self, url, exception):
+        """Callback from WorkerThread"""
         settings.logger.error("Could not download: {0:s}".format(url))
-        
+    
+    def image_resized(self, fname, local_path):
+        pass
+    
+    def image_resize_error(self, fname, local_path):
+        settings.logger.error("Error resize: {}".format(local_path))
+    
     def parse_site_info(self, lines):
         streamparser.XmlStreamParser.parse_site_info(self, lines)
         if not self.namespaces.get(int(self.namespace)):
@@ -125,9 +172,10 @@ class ImageDownloader(streamparser.XmlStreamParser):
             settings.logger.debug("Trying to get: {}".format(url))
             self.worker.get_image(
                 url, 
+                fname,
                 local_path,
                 self.image_downloaded,
-                self.image_error
+                self.image_download_error
             )
 
 

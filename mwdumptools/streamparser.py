@@ -4,6 +4,7 @@ import sys
 from xml.etree import cElementTree as etree
 
 from mwdumptools import settings
+import io
 
 
 class ParseError(Exception):
@@ -33,13 +34,13 @@ class Parser(object):
         elif not in_file is None:
             self._in_stream = in_file
         else:
-            self._in_stream = sys.stdin
-        if isinstance(in_file, str):
-            self._in_stream  = open(in_file)
-        elif not in_file is None:
-            self._in_stream = in_file
+            self._in_stream = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+        if isinstance(out_file, str):
+            self._out_stream  = open(out_file)
+        elif not out_file is None:
+            self._out_stream = in_file
         else:
-            self._in_stream = sys.stdin
+            self._out_stream = sys.stdout.encoding
 
     def execute(self):
         raise NotImplementedError("You need to overwrite execute with your own calls")
