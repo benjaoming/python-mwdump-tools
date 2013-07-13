@@ -1,3 +1,7 @@
+# Ignore eclipse
+.settings
+.pydev
+
 *.py[cod]
 
 # C extensions
