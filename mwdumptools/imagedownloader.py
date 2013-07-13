@@ -1,18 +1,34 @@
 # -*- coding: utf-8 -*-
-"""
+"""python-mwdump-tools imagedownloader
 
 Downloads images by parsing a Mediawiki dump and reading all the File:XXX
 articles.
 
-Since Python is single-threaded, we spawn a curl command for every image found
-and if resizing is required, each image is passed to imagemagick for scaling.
+Uses concurrency to download and scale images.
 
 The final output is the SQL to reconstruct the Mediawiki image table. You should
 do this because the script is not guaranteed to successfully download all images.
 
+
+Usage:
+  imagedownloader ship new <name>...
+  imagedownloader ship <name> move <x> <y> [--speed=<kn>]
+  imagedownloader ship shoot <x> <y>
+  imagedownloader mine (set|remove) <x> <y> [--moored | --drifting]
+  imagedownloader (-h | --help)
+  imagedownloader --version
+
+Options:
+  -h --help     Show this screen.
+  --version     Show version.
+  --speed=<kn>  Speed in knots [default: 10].
+  --moored      Moored (anchored) mine.
+  --drifting    Drifting mine.
+
 """
 from mwdumptools import settings
 from mwdumptools import streamparser
+from docopt import docopt
 import concurrent.futures
 import urllib.request
 import time
@@ -180,7 +196,7 @@ class ImageDownloader(streamparser.XmlStreamParser):
 
 
 if __name__ == "__main__":
-
+    arguments = docopt(__doc__, version='python-mw-tools imagedownloader 1.0')
     p = ImageDownloader()
     try:
         p.execute()
