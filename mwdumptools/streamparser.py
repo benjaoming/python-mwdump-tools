@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 import sys
-import logging
-FORMAT = '%(message)s'
-logging.basicConfig(format=FORMAT)
 
 from xml.etree import cElementTree as etree
+
+from mwdumptools import settings
 
 
 class ParseError(Exception):
@@ -29,16 +28,13 @@ class Parser(object):
     
     def __init__(self, in_file=None, out_file=None, err_file=None, **kwargs):
         
-        self.logger = logging.getLogger('mw-tools')
-        self.logger.setLevel(logging.DEBUG)
-        
-        if isinstance(in_file, basestring):
+        if isinstance(in_file, str):
             self._in_stream  = open(in_file)
         elif not in_file is None:
             self._in_stream = in_file
         else:
             self._in_stream = sys.stdin
-        if isinstance(in_file, basestring):
+        if isinstance(in_file, str):
             self._in_stream  = open(in_file)
         elif not in_file is None:
             self._in_stream = in_file
@@ -51,7 +47,7 @@ class Parser(object):
 
 class XmlStreamParser(Parser):
     
-    def __init__(self, in_file=None, out_file=None, err_file=None, **kwargs):
+    def __init__(self, in_file=None, out_file=None, **kwargs):
         Parser.__init__(self, in_file=in_file, out_file=out_file, **kwargs)
         self._schema_version = kwargs.get(
             "schema_version", "0.8"
@@ -90,16 +86,16 @@ class XmlStreamParser(Parser):
         except AttributeError:
             raise ParseError("No siteinfo generator")
         if not self.generator == self._generator:
-            self.logger.warning(
+            settings.logger.warning(
                 "Expected generator: " + self._generator + \
                 ", generator found:" + self.generator
             )
         for namespace in namespaces.findall("namespace"):
-            self.namespaces[namespace.get("key")] = namespace.text
+            self.namespaces[int(namespace.get("key"))] = namespace.text
         self.base = siteinfo.find("base").text
         self.case = siteinfo.find("case").text
         self.sitename = siteinfo.find("sitename").text
-        print self.namespaces
+        settings.logger.info("Now parsing dump: {}".format(self.sitename))
             
         
     def parse_schema(self, lines):
@@ -133,7 +129,7 @@ class XmlStreamParser(Parser):
         self.parse_site_info(lines)
         
         if self.resume:
-            logging.debug("Spooling forward to line: {}".format(self.resume))
+            settings.logger.debug("Spooling forward to line: {}".format(self.resume))
         
         # Main parser
         while not self._in_stream.closed:
@@ -148,14 +144,14 @@ class XmlStreamParser(Parser):
                 page = self.parse_etree(page_lines, "page")
                 self.handle_page(page)
             elif ln == "</mediawiki>":
-                self.logger.debug("Successfully finished parsing")
+                settings.logger.debug("Successfully finished parsing")
                 break
             else:
-                self.logger.debug("Did not understand " + ln)
+                settings.logger.debug("Did not understand " + ln)
             
             
     def handle_page(self, page):
-        self.logger.debug(page.find("title").text)
+        settings.logger.debug(page.find("title").text)
         
     
 if __name__ == "__main__":
@@ -163,7 +159,7 @@ if __name__ == "__main__":
     p = XmlStreamParser()
     try:
         p.execute()
-    except ParseError, e:
-        logging.error("Failed to parse, line no: {}".format(p.line_no))
-        logging.error(e)
-        logging.error("You can set resume={} after fixing to resume".format(p.line_no))
+    except ParseError as e:
+        settings.logger.error("Failed to parse, line no: {}".format(p.line_no))
+        settings.logger.error(e)
+        settings.logger.error("You can set resume={} after fixing to resume".format(p.line_no))

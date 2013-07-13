@@ -2,6 +2,9 @@
 .settings
 .pydev
 
+# test data
+images
+
 *.py[cod]
 
 # C extensions
