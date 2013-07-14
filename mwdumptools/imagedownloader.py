@@ -1,33 +1,47 @@
 # -*- coding: utf-8 -*-
-"""python-mwdump-tools imagedownloader
+"""
+=====================================
+python-mwdump-tools - imagedownloader
+=====================================
 
 Downloads images by parsing a Mediawiki dump and reading all the File:XXX
 articles.
 
 Uses concurrency to download and scale images.
 
-The final output is the SQL to reconstruct the Mediawiki image table. You should
-do this because the script is not guaranteed to successfully download all images.
+The final output is the SQL to reconstruct the Mediawiki image table. You 
+should do this because the script is not guaranteed to successfully download 
+all images.
 
 
 Usage:
-  imagedownloader ship new <name>...
-  imagedownloader ship <name> move <x> <y> [--speed=<kn>]
-  imagedownloader ship shoot <x> <y>
-  imagedownloader mine (set|remove) <x> <y> [--moored | --drifting]
+  imagedownloader [--dlurl=URL] 
+                  [--savepath=PATH] 
+                  [--scale] 
+                  [--ext=EXT]...
+                  [--resume=N]
+                  [--namespaces=NS]...
   imagedownloader (-h | --help)
   imagedownloader --version
 
 Options:
-  -h --help     Show this screen.
-  --version     Show version.
-  --speed=<kn>  Speed in knots [default: 10].
-  --moored      Moored (anchored) mine.
-  --drifting    Drifting mine.
-
+  -h --help          Show this screen.
+  --version          Show version.
+  --dlurl=URL        The root URL from where to find images. Python string
+                     formatting is required! Example:
+                     "http://upload.wikimedia.org/wikipedia/commons/{h1:s}/{h2:s}/{fname:s}"
+  --savepath=PATH    Where to save images
+  --scale            Should images be scaled after downloading?
+  --ext=EXT          Specify which extensions (not case sensitive) to include
+                     (remember that JPG and JPEG are different strings)
+                     [default: jpg, jpeg, png, gif, bmp, tiff]
+  --resume=N         Resume from line no (if the script has been interrupted)
+  --namespaces=NS    The mediawiki dump namespace to read from
+                     [default: 6]
 """
 from mwdumptools import settings
 from mwdumptools import streamparser
+from mwdumptools import VERSION
 from docopt import docopt
 import concurrent.futures
 import urllib.request
@@ -46,7 +60,7 @@ GET_EXTENSIONS = [".jpg", "jpeg", "png", "gif", "bmp"]
 OUTPUT_ROOT = os.path.abspath("./images")
 
 # Convert images before saving
-CONVERT = True
+SCALE = True
 MAX_IMAGE_SIZE = (1024, 1024)
 
 # Should match your CPU count and bandwidth speed.
@@ -59,18 +73,26 @@ MAX_THREADS = 8
 # Output
 OUTPUT_SQL = True
 
+DOWNLOAD_TIMEOUT = 10 #seconds
 
 # Retrieve a single page and report the url and contents
-def load_url(url, timeout):
+def load_url(url, local_path, timeout):
     conn = urllib.request.urlopen(url, timeout=timeout)
-    return conn.readall()
+    data = conn.readall()
+    settings.logger.debug("Got image, length: {0:d}".format(len(data)))
+    os.makedirs(os.path.dirname(local_path), mode=0o755, exist_ok=True)
+    f = open(local_path, "wb")
+    f.write(data)
+    f.close()
+    return local_path
 
-def scale_image(local_path, size, output_to=None):
+# Scale image bytes and save to local_path
+def scale_image(fname, local_path, size, output_to=None):
     if not output_to:
         output_to = local_path
     img = Image.open(local_path)
     img.thumbnail(size, Image.ANTIALIAS)
-    img.save(output_to)
+    img.save(output_to, format=local_path.split(".")[-1])
 
 
 # Decorator to add blocking waits when the job pool is saturated
@@ -101,47 +123,48 @@ class PoolWorker():
     
     def __init__(self, processes):
         self.processes = processes
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=processes)
+        self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=processes)
         self.jobs_running = 0
     
     @job
-    def get_image(self, url, fname, local_path, callback, error_callback):
+    def get_image(self, url, fname, local_path, timeout, callback, error_callback):
         try:
-            future = self.executor.submit(load_url, url, 60)
-            future.add_done_callback(lambda future: callback(future.result(), fname, local_path))
+            future = self.executor.submit(load_url, url, local_path, timeout)
+            future.add_done_callback(lambda future: callback(fname, future.result(), url))
         except Exception as exc:
             error_callback(url, exc)
     
     @job
     def scale_image(self, fname, local_path, size, callback, error_callback):
         try:
-            future = self.executor.submit(scale_image, size, local_path, 60)
-            future.add_done_callback(lambda future: callback(future.result(), fname, local_path))
+            future = self.executor.submit(scale_image, fname, local_path, size)
+            future.add_done_callback(lambda future: callback(fname, local_path))
         except Exception as exc:
             error_callback(local_path, exc)
+    
+    def shutdown(self, timeout):
+        time.sleep(timeout)
+        self.executor.shutdown(wait=True)
     
     
 
 class ImageDownloader(streamparser.XmlStreamParser):
     
-    def __init__(self, in_file=None, out_file=None, namespace=6, 
-        dlurl=DEFAULT_DOWNLOAD_PATH, output_dir=OUTPUT_ROOT,
+    def __init__(self, in_file=None, out_file=None, namespaces=["6"], 
+        dlurl=DEFAULT_DOWNLOAD_PATH, savepath=OUTPUT_ROOT,
         max_image_size=MAX_IMAGE_SIZE,
-        processes=MAX_THREADS, **kwargs):
-        self.namespace = "6"
-        self.dlurl = DEFAULT_DOWNLOAD_PATH
-        self.output_dir = OUTPUT_ROOT
+        processes=MAX_THREADS, timeout=DOWNLOAD_TIMEOUT, **kwargs):
+        self.namespaces = namespaces
+        self.dlurl = dlurl
+        self.output_dir = savepath
         self.max_image_size = max_image_size
+        self.timeout = timeout
         streamparser.XmlStreamParser.__init__(self, in_file=in_file, out_file=out_file, **kwargs)
         self.max_processes = processes
         self.worker = PoolWorker(processes)
     
-    def image_downloaded(self, data, fname, local_path):
+    def image_downloaded(self, fname, local_path, url):
         """Callback from WorkerThread"""
-        full_path = os.path.join(self.output_dir, local_path)
-        os.makedirs(os.path.dirname(full_path), mode=0o755, exist_ok=True)
-        open(full_path, "wb").write(data)
-        settings.logger.debug("Got image, length: {0:d}".format(len(data)))
         self.worker.scale_image(
             fname,
             local_path,
@@ -162,8 +185,6 @@ class ImageDownloader(streamparser.XmlStreamParser):
     
     def parse_site_info(self, lines):
         streamparser.XmlStreamParser.parse_site_info(self, lines)
-        if not self.namespaces.get(int(self.namespace)):
-            settings.logger.error("Dump does not specify namespace: {}".format(self.namespace))
     
     def get_hash(self, filename):
         m = md5()
@@ -172,10 +193,10 @@ class ImageDownloader(streamparser.XmlStreamParser):
         return c[0], c[0:2]
     
     def get_local_path(self, h1, h2, fname):
-        return os.path.join(h1, h2, fname)
+        return os.path.join(self.output_dir, h1, h2, fname)
     
     def handle_page(self, page):
-        if page.find("ns").text == self.namespace:
+        if page.find("ns").text in self.namespaces:
             # This is a file page, namespace = 6
             try:
                 title = page.find("title").text
@@ -190,17 +211,24 @@ class ImageDownloader(streamparser.XmlStreamParser):
                 url, 
                 fname,
                 local_path,
+                self.timeout,
                 self.image_downloaded,
                 self.image_download_error
             )
-
+    
+    def execute(self):
+        streamparser.XmlStreamParser.execute(self)
+        self.worker.shutdown(self.timeout)
+    
 
 if __name__ == "__main__":
-    arguments = docopt(__doc__, version='python-mw-tools imagedownloader 1.0')
-    p = ImageDownloader()
+    arguments = docopt(__doc__, version='python-mw-tools ' + str(VERSION))
+    arguments = dict((k.replace("--", ""),v) for k,v in arguments.items())
+    arguments = dict(filter(lambda kv: not kv[1] is None, [(k,v) for k,v in arguments.items()]))
+    p = ImageDownloader(**arguments)
     try:
         p.execute()
-    except streamparser.ParseError as e:
+    except Exception as e:
         settings.logger.error("Failed to parse, line no: {}".format(p.line_no))
         settings.logger.error(e)
         settings.logger.error("You can set resume={} after fixing to resume".format(p.line_no))

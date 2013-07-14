@@ -24,4 +24,8 @@ with imagedownloader:
     zlib provides access to compressed PNGs
     libtiff provides group4 tiff functionality
 
+    sudo apt-get install libjpeg-dev libtiff4-dev
 
+To reinstall Pillow after adding dependencies, run:
+
+    pip install pillow --force-reinstall --upgrade

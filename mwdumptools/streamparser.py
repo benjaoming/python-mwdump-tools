@@ -5,7 +5,7 @@ from xml.etree import cElementTree as etree
 
 from mwdumptools import settings
 import io
-
+from datetime import datetime
 
 class ParseError(Exception):
     pass
@@ -67,6 +67,7 @@ class XmlStreamParser(Parser):
         )
         self.resume = kwargs.get("resume", 0)
         self.line_no = 0 # Maintain line count for resuming
+        self.pages_processed = 0
     
     def parse_etree(self, lines, start_tag):
         start_tag = "<" + start_tag + ">"
@@ -81,7 +82,9 @@ class XmlStreamParser(Parser):
         namespaces = siteinfo.find("namespaces")
         if not namespaces:
             raise ParseError("No namespaces defined")
-        self.namespaces = {}
+        self._namespaces = {}
+        for namespace in namespaces.findall("namespace"):
+            self._namespaces[namespace.get("key")] = namespace.text
         try:
             self.generator = siteinfo.find("generator").text
         except AttributeError:
@@ -91,8 +94,6 @@ class XmlStreamParser(Parser):
                 "Expected generator: " + self._generator + \
                 ", generator found:" + self.generator
             )
-        for namespace in namespaces.findall("namespace"):
-            self.namespaces[int(namespace.get("key"))] = namespace.text
         self.base = siteinfo.find("base").text
         self.case = siteinfo.find("case").text
         self.sitename = siteinfo.find("sitename").text
@@ -121,7 +122,9 @@ class XmlStreamParser(Parser):
         ln = self._in_stream.readline().strip()
         if not self.parse_schema([ln]):
             return
-
+        
+        started_on = datetime.now()
+        
         # Site info
         lines = []
         while ln != "</siteinfo>":
@@ -144,8 +147,15 @@ class XmlStreamParser(Parser):
                     ln = ln.strip()
                 page = self.parse_etree(page_lines, "page")
                 self.handle_page(page)
+                if self.pages_processed % 1000 == 0:
+                    process_time = started_on - datetime.now()
+                    pps = self.pages_processed / process_time.total_seconds()
+                    settings.logger.info("Processed {} pages - {} pages per second".format(
+                        self.pages_processed, pps
+                    ))
+                self.pages_processed += 1
             elif ln == "</mediawiki>":
-                settings.logger.debug("Successfully finished parsing")
+                settings.logger.debug("Successfully finished parsing -- waiting for sub processes to finish")
                 break
             else:
                 settings.logger.debug("Did not understand " + ln)
