@@ -11,7 +11,7 @@ class ParseError(Exception):
     pass
 
 
-class Parser(object):
+class Parser:
     """
     Extend from this class to create your own parser methods
     

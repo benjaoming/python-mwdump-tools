@@ -1,14 +1,24 @@
 python-mwdump-tools
 ===================
 
-Quick parsing of Mediawiki XML dumps
+Quick parsing of Mediawiki XML dumps: Parses stdin XML dumps using simple
+string searching and Python's elementree C implementation for parsing each
+`<page>` node.
 
 
 ## imagedownloader
 
 Usage:
 
-    python3 -m mwdumptools.imagedownloader
+    python3 -m mwdumptools.imagedownloader --help
+
+Takes a mediawiki from stdin and parses all titles as file names, so you
+need to feed it the namespace of all File:XXX pages. For instance:
+
+    cat dump.xml > python3 -m mwdumptools.imagedownloader --namespaces=6
+
+It will download and place all images in the destined location and send SQL
+INSERT statements for populating the images table.
 
 ## Python 3
 

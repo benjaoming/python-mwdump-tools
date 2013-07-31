@@ -2,6 +2,9 @@
 .settings
 .pydev
 
+# Oh My zsh
+.venv
+
 # test data
 images
 

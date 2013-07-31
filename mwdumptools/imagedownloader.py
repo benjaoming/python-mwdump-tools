@@ -4,8 +4,8 @@
 python-mwdump-tools - imagedownloader
 =====================================
 
-Downloads images by parsing a Mediawiki dump and reading all the File:XXX
-articles.
+Naively downloads images by parsing a Mediawiki dump and reading all the 
+File:XXX articles.
 
 Uses concurrency to download and scale images.
 
@@ -16,7 +16,7 @@ all images.
 
 Usage:
   imagedownloader [--dlurl=URL] 
-                  [--savepath=PATH] 
+                  [--output=PATH] 
                   [--scale] 
                   [--ext=EXT]...
                   [--resume=N]
@@ -43,12 +43,17 @@ from mwdumptools import settings
 from mwdumptools import streamparser
 from mwdumptools import VERSION
 from docopt import docopt
+import sys
 import concurrent.futures
 import urllib.request
+import urllib.error
 import time
+import socket
 from hashlib import md5
 import os
 from PIL import Image
+import traceback
+import threading
 
 ################################################################
 # Default values, set using kwargs in ImageDownloader.__init__ #
@@ -56,6 +61,8 @@ from PIL import Image
 
 DEFAULT_DOWNLOAD_PATH = "http://upload.wikimedia.org/wikipedia/commons/{h1:s}/{h2:s}/{fname:s}"
 GET_EXTENSIONS = [".jpg", "jpeg", "png", "gif", "bmp"]
+
+DEFAULT_THUMBNAIL_PATH = "http://upload.wikimedia.org/wikipedia/commons/{h1:s}/{h2:s}/{fname:s}"
 
 OUTPUT_ROOT = os.path.abspath("./images")
 
@@ -73,18 +80,35 @@ MAX_THREADS = 8
 # Output
 OUTPUT_SQL = True
 
+SQL_UPDATE = (
+    "UPDATE image "
+    "SET img_width='{width:d}', img_height='{height:d}', img_size='{filesize}' "
+    "WHERE img_name='{name:s}'"
+)
+
 DOWNLOAD_TIMEOUT = 10 #seconds
+
+DOWNLOAD_RETRIES = 2
 
 # Retrieve a single page and report the url and contents
 def load_url(url, local_path, timeout):
-    conn = urllib.request.urlopen(url, timeout=timeout)
-    data = conn.readall()
-    settings.logger.debug("Got image, length: {0:d}".format(len(data)))
-    os.makedirs(os.path.dirname(local_path), mode=0o755, exist_ok=True)
-    f = open(local_path, "wb")
-    f.write(data)
-    f.close()
-    return local_path
+    for __ in range(DOWNLOAD_RETRIES):
+        try:    
+            conn = urllib.request.urlopen(url, timeout=timeout)
+            data = conn.readall()
+            settings.logger.debug("Got image, length: {0:d}".format(len(data)))
+            os.makedirs(os.path.dirname(local_path), mode=0o755, exist_ok=True)
+            f = open(local_path, "wb")
+            f.write(data)
+            f.close()
+            return local_path
+        except urllib.error.URLError:
+            continue # DNS error
+        except urllib.error.HTTPError:
+            return None # Probably 404, so do not retry
+        except socket.gaierror:
+            continue # Network error
+        
 
 # Scale image bytes and save to local_path
 def scale_image(fname, local_path, size, output_to=None):
@@ -93,6 +117,7 @@ def scale_image(fname, local_path, size, output_to=None):
     img = Image.open(local_path)
     img.thumbnail(size, Image.ANTIALIAS)
     img.save(output_to, format=local_path.split(".")[-1])
+    return img.size
 
 
 # Decorator to add blocking waits when the job pool is saturated
@@ -119,15 +144,24 @@ def job(fn):
 # called in a thread belonging to the process that added them. If the callable
 # raises a Exception subclass, it will be logged and ignored. If the callable
 # raises a BaseException subclass, the behavior is undefined.
-class PoolWorker():
+class ImagePoolWorker:
     
-    def __init__(self, processes):
+    def __init__(self, processes, dlurl, output_dir,
+            max_image_size, timeout, output_stream):
         self.processes = processes
         self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=processes)
         self.jobs_running = 0
+        self.dlurl = dlurl
+        self.output_dir = output_dir
+        self.max_image_size = max_image_size
+        self.timeout = timeout
+        self.max_processes = processes
+        self.output_lock = threading.Lock()
+        self.output_stream = output_stream
     
     @job
     def get_image(self, url, fname, local_path, timeout, callback, error_callback):
+        settings.logger.debug("Downloading {:s}".format(url))
         try:
             future = self.executor.submit(load_url, url, local_path, timeout)
             future.add_done_callback(lambda future: callback(fname, future.result(), url))
@@ -138,7 +172,7 @@ class PoolWorker():
     def scale_image(self, fname, local_path, size, callback, error_callback):
         try:
             future = self.executor.submit(scale_image, fname, local_path, size)
-            future.add_done_callback(lambda future: callback(fname, local_path))
+            future.add_done_callback(lambda future: callback(future, fname, local_path))
         except Exception as exc:
             error_callback(local_path, exc)
     
@@ -146,26 +180,9 @@ class PoolWorker():
         time.sleep(timeout)
         self.executor.shutdown(wait=True)
     
-    
-
-class ImageDownloader(streamparser.XmlStreamParser):
-    
-    def __init__(self, in_file=None, out_file=None, namespaces=["6"], 
-        dlurl=DEFAULT_DOWNLOAD_PATH, savepath=OUTPUT_ROOT,
-        max_image_size=MAX_IMAGE_SIZE,
-        processes=MAX_THREADS, timeout=DOWNLOAD_TIMEOUT, **kwargs):
-        self.namespaces = namespaces
-        self.dlurl = dlurl
-        self.output_dir = savepath
-        self.max_image_size = max_image_size
-        self.timeout = timeout
-        streamparser.XmlStreamParser.__init__(self, in_file=in_file, out_file=out_file, **kwargs)
-        self.max_processes = processes
-        self.worker = PoolWorker(processes)
-    
     def image_downloaded(self, fname, local_path, url):
         """Callback from WorkerThread"""
-        self.worker.scale_image(
+        self.scale_image(
             fname,
             local_path,
             self.max_image_size, 
@@ -177,14 +194,25 @@ class ImageDownloader(streamparser.XmlStreamParser):
         """Callback from WorkerThread"""
         settings.logger.error("Could not download: {0:s}".format(url))
     
-    def image_resized(self, fname, local_path):
-        pass
+    def image_resized(self, future, fname, local_path):
+        if future.exception() is not None:
+            settings.logger.error("got exception: %s" % future.exception())
+            return
+        size = future.result()
+        if not OUTPUT_SQL:
+            return
+        self.output_lock.acquire()
+        self.output_stream.write(SQL_UPDATE.format(
+            width=size[0], 
+            height=size[1], 
+            filesize=os.stat(local_path).st_size,
+            name=os.path.split(local_path)[-1]
+        ))
+        self.output_lock.release()
+        
     
     def image_resize_error(self, fname, local_path):
         settings.logger.error("Error resize: {}".format(local_path))
-    
-    def parse_site_info(self, lines):
-        streamparser.XmlStreamParser.parse_site_info(self, lines)
     
     def get_hash(self, filename):
         m = md5()
@@ -195,9 +223,25 @@ class ImageDownloader(streamparser.XmlStreamParser):
     def get_local_path(self, h1, h2, fname):
         return os.path.join(self.output_dir, h1, h2, fname)
     
+
+class ImageDownloader(streamparser.XmlStreamParser, ImagePoolWorker):
+    
+    def __init__(self, in_file=None, output=OUTPUT_ROOT, namespaces=["6"], 
+        dlurl=DEFAULT_DOWNLOAD_PATH, max_image_size=MAX_IMAGE_SIZE,
+        processes=MAX_THREADS, timeout=DOWNLOAD_TIMEOUT, **kwargs):
+
+        self.namespaces = namespaces
+        
+        streamparser.XmlStreamParser.__init__(self, in_file=in_file, 
+            out_file=sys.stdout, **kwargs)
+        ImagePoolWorker.__init__(self, processes, dlurl, output,
+            max_image_size, timeout, sys.stdout)
+    
+    def parse_site_info(self, lines):
+        streamparser.XmlStreamParser.parse_site_info(self, lines)
+    
     def handle_page(self, page):
         if page.find("ns").text in self.namespaces:
-            # This is a file page, namespace = 6
             try:
                 title = page.find("title").text
             except AttributeError:
@@ -207,7 +251,7 @@ class ImageDownloader(streamparser.XmlStreamParser):
             local_path = self.get_local_path(h1, h2, fname)
             url = DEFAULT_DOWNLOAD_PATH.format(h1=h1, h2=h2, fname=fname)
             settings.logger.debug("Trying to get: {}".format(url))
-            self.worker.get_image(
+            self.get_image(
                 url, 
                 fname,
                 local_path,
@@ -218,7 +262,7 @@ class ImageDownloader(streamparser.XmlStreamParser):
     
     def execute(self):
         streamparser.XmlStreamParser.execute(self)
-        self.worker.shutdown(self.timeout)
+        self.shutdown(self.timeout)
     
 
 if __name__ == "__main__":
@@ -231,4 +275,6 @@ if __name__ == "__main__":
     except Exception as e:
         settings.logger.error("Failed to parse, line no: {}".format(p.line_no))
         settings.logger.error(e)
-        settings.logger.error("You can set resume={} after fixing to resume".format(p.line_no))
+        settings.logger.debug(traceback.print_tb(sys.exc_info()[2]))
+        settings.logger.error("You can set --resume={} after fixing to resume".format(p.line_no))
+    
