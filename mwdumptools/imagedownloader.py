@@ -21,6 +21,7 @@ Usage:
   imagedownloader [--dlurls=URL]...
                   [--output=PATH]
                   [--scale]
+                  [--parse-articles]
                   [--ext=EXT]...
                   [--resume=N]
                   [--namespaces=NS]...
@@ -36,6 +37,11 @@ Options:
                      "http://upload.wikimedia.org/wikipedia/commons/{h1:s}/{h2:s}/{fname:s}"
   --savepath=PATH    Where to save images
   --scale            Should images be scaled after downloading?
+  --revisiontext     Instead of parsing 'File:...' revision titles, it's possible
+                     to parse texts of article revisions for patterns matching
+                     [[File:...]] like patterns. This is slower but fetches
+                     images that do not have their own page and also avoids
+                     fetching images that have no references.
   --ext=EXT          Specify which extensions (not case sensitive) to include
                      (remember that JPG and JPEG are different strings)
                      [default: jpg, jpeg, png, gif, bmp, tiff]
@@ -105,7 +111,7 @@ SKIP_EXISTING = True
 SEARCH_TITLES, SEARCH_ARTICLES = range(2)
 
 ARTICLE_FILE_PATTERN = re.compile(r"\[\[\s*(File|Media|Image):(?P<fname>[^|\]]+)[^\]]*\]\]")
-
+REVISION_TITLE_PATTERN = re.compile(r"^File:")
 
 # Retrieve a single page and report the url and contents
 def load_url(url, local_path, timeout):
@@ -264,8 +270,9 @@ class ImageDownloader(streamparser.XmlStreamParser, ImagePoolWorker):
     def __init__(self, dlurls=DEFAULT_DOWNLOAD_PATHS, in_file=None,
                  output=OUTPUT_ROOT, namespaces=DEFAULT_NAMESPACES,
                  max_image_size=MAX_IMAGE_SIZE, threads=DEFAULT_MAX_THREADS,
-                 timeout=DOWNLOAD_TIMEOUT, method=SEARCH_ARTICLES, **kwargs):
-        self.method = method
+                 timeout=DOWNLOAD_TIMEOUT,
+                 revisiontext=False, **kwargs):
+        self.method = SEARCH_ARTICLES if revisiontext else SEARCH_TITLES
         self.namespaces = namespaces
         self.output_stream = sys.stdout
         streamparser.XmlStreamParser.__init__(self, in_file=in_file,
@@ -305,7 +312,11 @@ class ImageDownloader(streamparser.XmlStreamParser, ImagePoolWorker):
             title = page.find("title").text
         except AttributeError:
             settings.logging.warning(
-                "No title in <page>, line:", self.line_no)
+                "No title in <page>, line: %d", self.line_no)
+            return
+        if not REVISION_TITLE_PATTERN.search(title):
+            settings.logging.warning(
+                "Title '%s' starting with 'File:' in <page>, line: %d", title, self.line_no)
             return
         fname = title.replace("File:", "")
         settings.logger.debug("Started download job for: " + fname)
