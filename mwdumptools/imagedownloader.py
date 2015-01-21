@@ -4,20 +4,20 @@
 python-mwdump-tools - imagedownloader
 =====================================
 
-Naively downloads images by parsing a Mediawiki dump and reading all the 
+Naively downloads images by parsing a Mediawiki dump and reading all the
 File:XXX articles.
 
 Uses concurrency to download and scale images.
 
-The final output is the SQL to reconstruct the Mediawiki image table. You 
-should do this because the script is not guaranteed to successfully download 
+The final output is the SQL to reconstruct the Mediawiki image table. You
+should do this because the script is not guaranteed to successfully download
 all images.
 
 
 Usage:
-  imagedownloader [--dlurl=URL] 
-                  [--output=PATH] 
-                  [--scale] 
+  imagedownloader [--dlurl=URL]
+                  [--output=PATH]
+                  [--scale]
                   [--ext=EXT]...
                   [--resume=N]
                   [--namespaces=NS]...
@@ -39,26 +39,28 @@ Options:
   --namespaces=NS    The mediawiki dump namespace to read from
                      [default: 6]
 """
-from mwdumptools import settings
-from mwdumptools import streamparser
-from mwdumptools import VERSION
-from docopt import docopt
-import sys
 import concurrent.futures
-import urllib.request
-import urllib.error
-import time
-import socket
 from hashlib import md5
 import os
-from PIL import Image
-import traceback
+import socket
+import sys
 import threading
+import time
+import traceback
+import urllib.error
+import urllib.request
+
+from PIL import Image
+from docopt import docopt
+
+from . import VERSION
+from . import settings
+from . import streamparser
+
 
 ################################################################
 # Default values, set using kwargs in ImageDownloader.__init__ #
 ################################################################
-
 DEFAULT_DOWNLOAD_PATH = "http://upload.wikimedia.org/wikipedia/commons/{h1:s}/{h2:s}/{fname:s}"
 GET_EXTENSIONS = [".jpg", "jpeg", "png", "gif", "bmp"]
 

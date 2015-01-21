@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
+from datetime import datetime
+import io
 import sys
-
 from xml.etree import cElementTree as etree
 
-from mwdumptools import settings
-import io
-from datetime import datetime
+from . import settings
 
 
 class ParseError(Exception):
@@ -33,14 +32,14 @@ class Parser:
 
         if isinstance(in_file, str):
             self._in_stream = open(in_file)
-        elif not in_file is None:
+        elif in_file is not None:
             self._in_stream = in_file
         else:
             self._in_stream = io.TextIOWrapper(
                 sys.stdin.buffer, encoding='utf-8')
         if isinstance(out_file, str):
             self._out_stream = open(out_file)
-        elif not out_file is None:
+        elif out_file is not None:
             self._out_stream = in_file
         else:
             self._out_stream = sys.stdout.encoding
@@ -75,7 +74,7 @@ class XmlStreamParser(Parser):
 
     def parse_etree(self, lines, start_tag):
         start_tag = "<" + start_tag + ">"
-        if not start_tag in lines[0]:
+        if start_tag not in lines[0]:
             raise ParseError("Expected: " + start_tag)
         lines[0].replace(start_tag, "")
         return etree.fromstring("\n".join(lines))
