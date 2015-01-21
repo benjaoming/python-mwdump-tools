@@ -86,14 +86,16 @@ SQL_UPDATE = (
     "WHERE img_name='{name:s}'"
 )
 
-DOWNLOAD_TIMEOUT = 10 #seconds
+DOWNLOAD_TIMEOUT = 10  # seconds
 
 DOWNLOAD_RETRIES = 2
 
 # Retrieve a single page and report the url and contents
+
+
 def load_url(url, local_path, timeout):
     for __ in range(DOWNLOAD_RETRIES):
-        try:    
+        try:
             conn = urllib.request.urlopen(url, timeout=timeout)
             data = conn.readall()
             settings.logger.debug("Got image, length: {0:d}".format(len(data)))
@@ -103,12 +105,12 @@ def load_url(url, local_path, timeout):
             f.close()
             return local_path
         except urllib.error.URLError:
-            continue # DNS error
+            continue  # DNS error
         except urllib.error.HTTPError:
-            return None # Probably 404, so do not retry
+            return None  # Probably 404, so do not retry
         except socket.gaierror:
-            continue # Network error
-        
+            continue  # Network error
+
 
 # Scale image bytes and save to local_path
 def scale_image(fname, local_path, size, output_to=None):
@@ -133,7 +135,7 @@ def job(fn):
 
 
 # http://docs.python.org/dev/library/concurrent.futures#processpoolexecutor
-# The ProcessPoolExecutor class is an Executor subclass that uses a pool of 
+# The ProcessPoolExecutor class is an Executor subclass that uses a pool of
 # processes to execute calls asynchronously. ProcessPoolExecutor uses the
 # multiprocessing module, which allows it to side-step the
 # Global Interpreter Lock but also means that only picklable objects can
@@ -145,11 +147,12 @@ def job(fn):
 # raises a Exception subclass, it will be logged and ignored. If the callable
 # raises a BaseException subclass, the behavior is undefined.
 class ImagePoolWorker:
-    
+
     def __init__(self, processes, dlurl, output_dir,
-            max_image_size, timeout, output_stream):
+                 max_image_size, timeout, output_stream):
         self.processes = processes
-        self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=processes)
+        self.executor = concurrent.futures.ProcessPoolExecutor(
+            max_workers=processes)
         self.jobs_running = 0
         self.dlurl = dlurl
         self.output_dir = output_dir
@@ -158,42 +161,44 @@ class ImagePoolWorker:
         self.max_processes = processes
         self.output_lock = threading.Lock()
         self.output_stream = output_stream
-    
+
     @job
     def get_image(self, url, fname, local_path, timeout, callback, error_callback):
         settings.logger.debug("Downloading {:s}".format(url))
         try:
             future = self.executor.submit(load_url, url, local_path, timeout)
-            future.add_done_callback(lambda future: callback(fname, future.result(), url))
+            future.add_done_callback(
+                lambda future: callback(fname, future.result(), url))
         except Exception as exc:
             error_callback(url, exc)
-    
+
     @job
     def scale_image(self, fname, local_path, size, callback, error_callback):
         try:
             future = self.executor.submit(scale_image, fname, local_path, size)
-            future.add_done_callback(lambda future: callback(future, fname, local_path))
+            future.add_done_callback(
+                lambda future: callback(future, fname, local_path))
         except Exception as exc:
             error_callback(local_path, exc)
-    
+
     def shutdown(self, timeout):
         time.sleep(timeout)
         self.executor.shutdown(wait=True)
-    
+
     def image_downloaded(self, fname, local_path, url):
         """Callback from WorkerThread"""
         self.scale_image(
             fname,
             local_path,
-            self.max_image_size, 
-            self.image_resized, 
+            self.max_image_size,
+            self.image_resized,
             self.image_resize_error
         )
-    
+
     def image_download_error(self, url, exception):
         """Callback from WorkerThread"""
         settings.logger.error("Could not download: {0:s}".format(url))
-    
+
     def image_resized(self, future, fname, local_path):
         if future.exception() is not None:
             settings.logger.error("got exception: %s" % future.exception())
@@ -203,72 +208,73 @@ class ImagePoolWorker:
             return
         self.output_lock.acquire()
         self.output_stream.write(SQL_UPDATE.format(
-            width=size[0], 
-            height=size[1], 
+            width=size[0],
+            height=size[1],
             filesize=os.stat(local_path).st_size,
             name=os.path.split(local_path)[-1]
         ))
         self.output_lock.release()
-        
-    
+
     def image_resize_error(self, fname, local_path):
         settings.logger.error("Error resize: {}".format(local_path))
-    
+
     def get_hash(self, filename):
         m = md5()
         m.update(filename.encode('utf-8'))
         c = m.hexdigest()
         return c[0], c[0:2]
-    
+
     def get_local_path(self, h1, h2, fname):
         return os.path.join(self.output_dir, h1, h2, fname)
-    
+
 
 class ImageDownloader(streamparser.XmlStreamParser, ImagePoolWorker):
-    
-    def __init__(self, in_file=None, output=OUTPUT_ROOT, namespaces=["6"], 
-        dlurl=DEFAULT_DOWNLOAD_PATH, max_image_size=MAX_IMAGE_SIZE,
-        processes=MAX_THREADS, timeout=DOWNLOAD_TIMEOUT, **kwargs):
+
+    def __init__(self, in_file=None, output=OUTPUT_ROOT, namespaces=["6"],
+                 dlurl=DEFAULT_DOWNLOAD_PATH, max_image_size=MAX_IMAGE_SIZE,
+                 processes=MAX_THREADS, timeout=DOWNLOAD_TIMEOUT, **kwargs):
 
         self.namespaces = namespaces
-        
-        streamparser.XmlStreamParser.__init__(self, in_file=in_file, 
-            out_file=sys.stdout, **kwargs)
+
+        streamparser.XmlStreamParser.__init__(self, in_file=in_file,
+                                              out_file=sys.stdout, **kwargs)
         ImagePoolWorker.__init__(self, processes, dlurl, output,
-            max_image_size, timeout, sys.stdout)
-    
+                                 max_image_size, timeout, sys.stdout)
+
     def parse_site_info(self, lines):
         streamparser.XmlStreamParser.parse_site_info(self, lines)
-    
+
     def handle_page(self, page):
         if page.find("ns").text in self.namespaces:
             try:
                 title = page.find("title").text
             except AttributeError:
-                settings.logging.warning("No title in <page>, line:", self.line_no)
+                settings.logging.warning(
+                    "No title in <page>, line:", self.line_no)
             fname = title.replace("File:", "")
             h1, h2 = self.get_hash(fname)
             local_path = self.get_local_path(h1, h2, fname)
             url = DEFAULT_DOWNLOAD_PATH.format(h1=h1, h2=h2, fname=fname)
             settings.logger.debug("Trying to get: {}".format(url))
             self.get_image(
-                url, 
+                url,
                 fname,
                 local_path,
                 self.timeout,
                 self.image_downloaded,
                 self.image_download_error
             )
-    
+
     def execute(self):
         streamparser.XmlStreamParser.execute(self)
         self.shutdown(self.timeout)
-    
+
 
 if __name__ == "__main__":
     arguments = docopt(__doc__, version='python-mw-tools ' + str(VERSION))
-    arguments = dict((k.replace("--", ""),v) for k,v in arguments.items())
-    arguments = dict(filter(lambda kv: not kv[1] is None, [(k,v) for k,v in arguments.items()]))
+    arguments = dict((k.replace("--", ""), v) for k, v in arguments.items())
+    arguments = dict(
+        filter(lambda kv: not kv[1] is None, [(k, v) for k, v in arguments.items()]))
     p = ImageDownloader(**arguments)
     try:
         p.execute()
@@ -276,5 +282,5 @@ if __name__ == "__main__":
         settings.logger.error("Failed to parse, line no: {}".format(p.line_no))
         settings.logger.error(e)
         settings.logger.debug(traceback.print_tb(sys.exc_info()[2]))
-        settings.logger.error("You can set --resume={} after fixing to resume".format(p.line_no))
-    
+        settings.logger.error(
+            "You can set --resume={} after fixing to resume".format(p.line_no))
