@@ -41,7 +41,7 @@ Options:
                      [default: jpg, jpeg, png, gif, bmp, tiff]
   --resume=N         Resume from line no (if the script has been interrupted)
   --namespaces=NS    The mediawiki dump namespace to read from
-                     [default: 0]
+                     [default: 0, 10]
   --threads=N        Number of concurrent threads that should download and scale
                      images (most likely you should set this to the number of
                      CPU cores but depending on how slow your internet connection
@@ -51,6 +51,7 @@ Options:
 import concurrent.futures
 from hashlib import md5
 import os
+import re
 import socket
 import sys
 import threading
@@ -73,7 +74,7 @@ from . import streamparser
 DEFAULT_DOWNLOAD_PATHS = ["http://upload.wikimedia.org/wikipedia/commons/{h1:s}/{h2:s}/{fname:s}"]
 GET_EXTENSIONS = [".jpg", "jpeg", "png", "gif", "bmp"]
 
-DEFAULT_NAMESPACES = ["0"]
+DEFAULT_NAMESPACES = ["0", "10"]
 
 DEFAULT_THUMBNAIL_PATH = "http://upload.wikimedia.org/wikipedia/commons/{h1:s}/{h2:s}/{fname:s}"
 
@@ -93,15 +94,17 @@ DEFAULT_MAX_THREADS = 8
 # Output SQL for mediawiki images insert to STDOUT
 OUTPUT_SQL = True
 
-SQL_VALUES = (
-    "('{name:s}', '{width:d}', '{height:d}', '{filesize}'),\n"
-)
+SQL_VALUES = "('{name:s}', '{width:d}', '{height:d}', '{filesize:d}'),\n"
 
 DOWNLOAD_TIMEOUT = 10  # seconds
 
 DOWNLOAD_RETRIES = 2
 
 SKIP_EXISTING = True
+
+SEARCH_TITLES, SEARCH_ARTICLES = range(2)
+
+ARTICLE_FILE_PATTERN = re.compile(r"\[\[\s*(File|Media|Image):(?P<fname>[^|\]]+)[^\]]*\]\]")
 
 
 # Retrieve a single page and report the url and contents
@@ -205,9 +208,9 @@ class ImagePoolWorker:
         except Exception as exc:
             error_callback(local_path, exc)
 
-    def shutdown(self, timeout):
+    def shutdown(self, timeout, wait=True):
         time.sleep(timeout)
-        self.executor.shutdown(wait=True)
+        self.executor.shutdown(wait=wait)
 
     def image_downloaded(self, fname, local_path, results, url):
         """Callback from WorkerThread"""
@@ -231,15 +234,15 @@ class ImagePoolWorker:
                 return
             size = future.result()
         else:
-            size = os.path.getsize(local_path)
+            size = [0, 0]
         if not OUTPUT_SQL:
             return
         self.output_lock.acquire()
         self.output_stream.write(SQL_VALUES.format(
             width=size[0],
             height=size[1],
-            filesize=os.stat(local_path).st_size,
-            name=os.path.split(local_path)[-1]
+            filesize=os.path.getsize(local_path),
+            name=os.path.split(local_path)[-1],
         ))
         self.output_lock.release()
 
@@ -261,8 +264,8 @@ class ImageDownloader(streamparser.XmlStreamParser, ImagePoolWorker):
     def __init__(self, dlurls=DEFAULT_DOWNLOAD_PATHS, in_file=None,
                  output=OUTPUT_ROOT, namespaces=DEFAULT_NAMESPACES,
                  max_image_size=MAX_IMAGE_SIZE, threads=DEFAULT_MAX_THREADS,
-                 timeout=DOWNLOAD_TIMEOUT, **kwargs):
-        
+                 timeout=DOWNLOAD_TIMEOUT, method=SEARCH_ARTICLES, **kwargs):
+        self.method = method
         self.namespaces = namespaces
         self.output_stream = sys.stdout
         streamparser.XmlStreamParser.__init__(self, in_file=in_file,
@@ -274,29 +277,51 @@ class ImageDownloader(streamparser.XmlStreamParser, ImagePoolWorker):
         streamparser.XmlStreamParser.parse_site_info(self, lines)
 
     def handle_page(self, page):
-        raise NotImplementedError("This function should not use the title tag but rather scan the article text for any usage of [[File]]")
         if page.find("ns").text in self.namespaces:
-            try:
-                title = page.find("title").text
-            except AttributeError:
-                settings.logging.warning(
-                    "No title in <page>, line:", self.line_no)
-            fname = title.replace("File:", "")
-            h1, h2 = self.get_hash(fname)
-            local_path = self.get_local_path(h1, h2, fname)
-            urls = list(map(
-                lambda s: s.format(h1=h1, h2=h2, fname=fname),
-                DEFAULT_DOWNLOAD_PATHS
-            ))
-            settings.logger.debug("Started download job for: " + fname)
-            self.get_images(
-                urls,
-                fname,
-                local_path,
-                self.timeout,
-                self.image_downloaded,
-                self.image_download_error
-            )
+            if self.method == SEARCH_TITLES:
+                fnames = self.get_filenames_from_title_tag(page)
+            else:
+                fnames = self.get_filenames_from_article_text(page)
+            for fname in fnames:
+                h1, h2 = self.get_hash(fname)
+                local_path = self.get_local_path(h1, h2, fname)
+                urls = list(map(
+                    lambda s: s.format(h1=h1, h2=h2, fname=fname),
+                    DEFAULT_DOWNLOAD_PATHS
+                ))
+                self.get_images(
+                    urls,
+                    fname,
+                    local_path,
+                    self.timeout,
+                    self.image_downloaded,
+                    self.image_download_error
+                )
+
+    def get_filenames_from_title_tag(self, page):
+        """Titles are usually found in namespace 6 and the title is then stored
+        as <title>filename.ext</title>."""
+        try:
+            title = page.find("title").text
+        except AttributeError:
+            settings.logging.warning(
+                "No title in <page>, line:", self.line_no)
+            return
+        fname = title.replace("File:", "")
+        settings.logger.debug("Started download job for: " + fname)
+        yield fname
+
+    def get_filenames_from_article_text(self, page):
+        """Titles are usually found in namespace 6 and the title is then stored
+        as <title>filename.ext</title>."""
+        try:
+            text = page.find("revision").find("text").text
+        except AttributeError:
+            return
+        for match in ARTICLE_FILE_PATTERN.findall(text):
+            if "{{{" in match[1]:
+                raise NotImplementedError("Does not know what to do with variables")
+            yield match[1]
 
     def execute(self):
         if OUTPUT_SQL:
@@ -319,3 +344,4 @@ if __name__ == "__main__":
         settings.logger.debug(traceback.print_tb(sys.exc_info()[2]))
         settings.logger.error(
             "You can set --resume={} after fixing to resume".format(p.line_no))
+        p.shutdown(0, wait=False)
